@@ -3,6 +3,8 @@ import { Inter, Instrument_Serif } from "next/font/google";
 import localFont from "next/font/local";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
+import { Toaster } from "sonner";
+import { QueryProvider } from "@/components/query-provider";
 import "./globals.css";
 import {
   assetUrl,
@@ -71,7 +73,10 @@ export default function RootLayout({
       className={`${inter.variable} ${instrumentSerif.variable} ${excalifont.variable}`}
     >
       <body className="antialiased">
-        {children}
+        <QueryProvider>{children}</QueryProvider>
+        {/* sonner renders nothing without this. It was never mounted, so every
+            existing `toast.*` call in the dashboard was silently a no-op. */}
+        <Toaster position="bottom-right" richColors />
         <Analytics />
         <SpeedInsights />
       </body>

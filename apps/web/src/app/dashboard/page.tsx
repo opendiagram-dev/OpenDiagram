@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
 import { GuestWelcomeDialog } from "@/components/auth/guest-welcome-dialog";
+import { CheckoutReturn } from "@/components/billing/checkout-return";
 import { DashboardDialogs } from "@/components/dashboard/dashboard-page/DashboardDialogs";
 import { DashboardMain } from "@/components/dashboard/dashboard-page/DashboardMain";
 import { DashboardSidebar } from "@/components/dashboard/dashboard-page/DashboardSidebar";
@@ -27,8 +28,7 @@ export default function DashboardPage() {
     setSignOutPending(true);
     try {
       await authClient.signOut();
-      data.setSavedProjects([]);
-      data.setSavedProjectsLoaded(false);
+      data.resetSavedProjects();
       setSignedOutDialogOpen(true);
     } finally {
       setSignOutPending(false);
@@ -46,6 +46,10 @@ export default function DashboardPage() {
 
   return (
     <main className="h-dvh overflow-hidden bg-od-surface text-od-ink">
+      {/* Suspense because it reads search params, which Next requires a boundary for. */}
+      <Suspense fallback={null}>
+        <CheckoutReturn />
+      </Suspense>
       <div className="flex h-full w-full overflow-hidden">
         <DashboardSidebar
           accountId={user?.id}
