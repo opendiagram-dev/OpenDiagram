@@ -7,6 +7,7 @@ import {
   sketchTheme,
   type DiagramSpec,
 } from "../src/index.js";
+import { containerTitleBox } from "../src/measure.js";
 import { allFinite } from "./helpers.js";
 
 describe("elk layout invariants", () => {
@@ -193,4 +194,200 @@ test("sketch theme: icon-less node renders label INSIDE its box", async () => {
   if (box?.kind !== "container" || label?.kind !== "text") throw new Error("missing api node");
   expect(label.y).toBeGreaterThan(box.y);
   expect(label.y).toBeLessThan(box.y + box.height);
+});
+
+describe("place, polish, route", () => {
+  const center = (b: { x: number; y: number; width: number; height: number }) => ({
+    x: b.x + b.width / 2,
+    y: b.y + b.height / 2,
+  });
+
+  test("swimlanes: full-width bands in spec order, flow runs along them", async () => {
+    const spec: DiagramSpec = {
+      type: "bpmn",
+      title: "Lanes",
+      nodes: ["a", "b", "c", "d"].map((id) => ({ id, label: `Step ${id}` })),
+      edges: [
+        { from: "a", to: "b" },
+        { from: "b", to: "c" },
+        { from: "c", to: "d" },
+        { from: "c", to: "a", label: "retry" },
+      ],
+      groups: [
+        { id: "emp", label: "Employee", contains: ["a", "b", "d"], style: "swimlane" },
+        { id: "mgr", label: "Manager", contains: ["c"], style: "swimlane" },
+      ],
+    };
+    const p = await layoutDiagram(spec, classicTheme);
+    const [emp, mgr] = [p.groupBoxes.emp!, p.groupBoxes.mgr!];
+    expect(emp.width).toBe(mgr.width);
+    expect(mgr.y).toBeGreaterThanOrEqual(emp.y + emp.height);
+    // Authored order is run order: the retry is the back edge, not the flow.
+    const xs = ["a", "b", "c", "d"].map((id) => center(p.positions[id]!).x);
+    for (let i = 1; i < xs.length; i++) expect(xs[i]!).toBeGreaterThan(xs[i - 1]!);
+  });
+
+  test("swimlane nodes clear a wrapped lane title", async () => {
+    const spec: DiagramSpec = {
+      type: "bpmn",
+      title: "Lanes",
+      nodes: ["a", "b"].map((id) => ({ id, label: `Step ${id}` })),
+      edges: [{ from: "a", to: "b" }],
+      groups: [
+        {
+          id: "ops",
+          label: "Operations",
+          sublabel: "Night shift and weekend on-call rota",
+          contains: ["a"],
+          style: "swimlane",
+        },
+        { id: "fin", label: "Finance", contains: ["b"], style: "swimlane" },
+      ],
+    };
+    const p = await layoutDiagram(spec, sketchTheme);
+    const title = containerTitleBox(spec.groups![0]!, sketchTheme);
+    expect(title.lines.length).toBe(2);
+    // The renderer draws the title at box.y + 12.
+    expect(p.positions.a!.y).toBeGreaterThan(p.groupBoxes.ops!.y + 12 + title.height);
+  });
+
+  test("replication does not rank the replica after the primary", async () => {
+    const spec: DiagramSpec = {
+      type: "cloud-architecture",
+      title: "Mirror",
+      nodes: ["api1", "db1", "api2", "db2"].map((id) => ({ id, label: id })),
+      edges: [
+        { from: "api1", to: "db1" },
+        { from: "api2", to: "db2" },
+        { from: "db1", to: "db2", kind: "replication" },
+      ],
+      groups: [
+        { id: "primary", label: "Primary", contains: ["api1", "db1"], style: "region" },
+        { id: "replica", label: "Replica", contains: ["api2", "db2"], style: "region" },
+      ],
+    };
+    const p = await layoutDiagram(spec, classicTheme);
+    expect(Math.abs(center(p.positions.db1!).x - center(p.positions.db2!).x)).toBeLessThan(40);
+  });
+
+  test("a push back to a client keeps the client at the start of the flow", async () => {
+    const spec: DiagramSpec = {
+      type: "system-design",
+      title: "Push",
+      nodes: [
+        { id: "app", label: "Mobile App", category: "client" },
+        { id: "gw", label: "Gateway", category: "gateway" },
+        { id: "svc", label: "Orders", category: "service" },
+        { id: "push", label: "Notifier", category: "service" },
+      ],
+      edges: [
+        { from: "app", to: "gw" },
+        { from: "gw", to: "svc" },
+        { from: "svc", to: "push" },
+        { from: "push", to: "app", label: "push" },
+      ],
+    };
+    const p = await layoutDiagram(spec, classicTheme);
+    const x = (id: string) => center(p.positions[id]!).x;
+    expect(x("app")).toBeLessThan(x("gw"));
+    expect(x("gw")).toBeLessThan(x("svc"));
+    expect(x("svc")).toBeLessThan(x("push"));
+  });
+
+  test("a replica fed only by replication ranks after its primaries", async () => {
+    const spec: DiagramSpec = {
+      type: "system-design",
+      title: "DR",
+      nodes: ["gw", "a", "b", "dbA", "dbB", "dr"].map((id) => ({ id, label: id })),
+      edges: [
+        { from: "gw", to: "a" },
+        { from: "gw", to: "b" },
+        { from: "a", to: "dbA" },
+        { from: "b", to: "dbB" },
+        { from: "dbA", to: "dr", kind: "replication" },
+        { from: "dbB", to: "dr", kind: "replication" },
+      ],
+    };
+    const p = await layoutDiagram(spec, classicTheme);
+    const x = (id: string) => center(p.positions[id]!).x;
+    expect(x("dr")).toBeGreaterThan(Math.max(x("dbA"), x("dbB")));
+  });
+
+  test("group boxes fit their titles, LR and TB, single-run and fold", async () => {
+    const groups = [
+      {
+        id: "g1",
+        label: "Ingestion Pipeline",
+        sublabel: "Workers on EKS spot fleet",
+        contains: ["a", "b"],
+      },
+      {
+        id: "g2",
+        label: "Primary Region Persistence",
+        sublabel: "Read/Write Cluster",
+        contains: ["c", "d"],
+      },
+    ];
+    // The zone case is the one elkjs gets wrong in TB (eclipse/elk#1033): nested compounds.
+    for (const zones of [undefined, [{ id: "z", label: "Region", contains: ["g1", "g2"] }]])
+      for (const direction of ["LR", "TB"] as const)
+        for (const strategy of ["single", "two-phase"] as const) {
+          const spec: DiagramSpec = {
+            type: "system-design",
+            title: "Titles",
+            nodes: ["a", "b", "c", "d"].map((id) => ({ id, label: id })),
+            edges: [
+              { from: "a", to: "b" },
+              { from: "b", to: "c" },
+              { from: "c", to: "d" },
+            ],
+            groups,
+            zones,
+            meta: { direction },
+          };
+          const p = await layoutDiagram(spec, sketchTheme, { strategy });
+          for (const g of groups) {
+            const title = containerTitleBox(g, sketchTheme);
+            const box = p.groupBoxes[g.id]!;
+            expect(box.width).toBeGreaterThanOrEqual(title.width + 28);
+            // Long "label - sublabel" titles wrap instead of stretching the box to one line.
+            expect(title.lines).toEqual([g.label, g.sublabel]);
+            expect(box.width).toBeLessThan(480);
+            // A box widened for its title centres its children, it does not pin them left.
+            const kids = g.contains.map((id) => p.positions[id]!);
+            const left = Math.min(...kids.map((k) => k.x));
+            const right = Math.max(...kids.map((k) => k.x + k.width));
+            expect(Math.abs((left + right) / 2 - (box.x + box.width / 2))).toBeLessThan(6);
+          }
+        }
+  });
+
+  test("a long chain wraps instead of becoming a ribbon", async () => {
+    const ids = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const spec: DiagramSpec = {
+      type: "system-design",
+      title: "Chain",
+      nodes: ids.map((id) => ({ id, label: `Service ${id}`, category: "service" })),
+      edges: ids.slice(1).map((id, i) => ({ from: ids[i]!, to: id, label: "calls next" })),
+    };
+    const p = await layoutDiagram(spec, sketchTheme);
+    const boxes = Object.values(p.positions);
+    const width = Math.max(...boxes.map((b) => b.x + b.width)) - Math.min(...boxes.map((b) => b.x));
+    const height =
+      Math.max(...boxes.map((b) => b.y + b.height)) - Math.min(...boxes.map((b) => b.y));
+    expect(width / height).toBeLessThan(4);
+  });
+
+  test("layers inside a group keep the root layer spacing", async () => {
+    const spec: DiagramSpec = {
+      type: "system-design",
+      title: "Spacing",
+      nodes: ["a", "b"].map((id) => ({ id, label: id })),
+      edges: [{ from: "a", to: "b" }],
+      groups: [{ id: "g", label: "G", contains: ["a", "b"] }],
+    };
+    const p = await layoutDiagram(spec, classicTheme);
+    const [a, b] = [p.positions.a!, p.positions.b!];
+    expect(b.x - (a.x + a.width)).toBeGreaterThanOrEqual(100);
+  });
 });
