@@ -46,9 +46,17 @@ export const env = createEnv({
     // address, which is enough for local testing and nothing else.
     RESEND_API_KEY: z.string().min(1).optional(),
     RESEND_FROM: z.string().min(1).default("OpenDiagram <onboarding@resend.dev>"),
+    // Where email images load from: the media bucket, which mirrors apps/web/public
+    // under public/. Sent mail keeps these URLs forever, so never point this at a
+    // host that can go away (r2.dev, a preview). Mail clients fetch through their
+    // own proxies, so localhost never renders in Gmail.
+    EMAIL_ASSET_URL: z.url().default("https://media.opendiagram.ink/public/email"),
     // Fraction of traces sampled, 0..1. Full sampling by default: gen_ai runs
     // are sampled as a whole span tree, so dropping a root span loses the
     // entire agent run. Lower it here if span volume becomes a problem.
+    // Sentry - OPTIONAL. Unset means no error or trace reporting. Not hardcoded:
+    // a clone of this repo would otherwise report into our Sentry project.
+    SENTRY_DSN: z.url().optional(),
     SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(1),
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
     // Writes the whole DiagramSpec into the draw_diagram wide event, which is

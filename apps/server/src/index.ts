@@ -1,4 +1,5 @@
 import { auth } from "@OpenDiagram/auth";
+import { db, sql } from "@OpenDiagram/db";
 import { env } from "@OpenDiagram/env/server";
 import { sentry } from "@sentry/hono/bun";
 import { initLogger } from "evlog";
@@ -32,11 +33,9 @@ initLogger({
 
 const origins = env.CORS_ORIGIN.split(",").map((o) => o.trim());
 
-// Server-project DSN (public value). The Bun transport flushes asynchronously;
-// on Cloud Run (CPU throttled after response) low-traffic events may lag until
-// the next request or SIGTERM. Acceptable for now — revisit if events drop.
-const SENTRY_DSN =
-  "https://d065bd035ab8612f7d8527b0529c6742@o4511790063812608.ingest.us.sentry.io/4511790076592128";
+// The Bun transport flushes asynchronously; on Cloud Run (CPU throttled after
+// response) low-traffic events may lag until the next request or SIGTERM.
+// Acceptable for now — revisit if events drop.
 
 const app = new Hono<{ Variables: SessionVariables }>();
 
@@ -48,7 +47,7 @@ const app = new Hono<{ Variables: SessionVariables }>();
 // https://docs.sentry.io/platforms/javascript/guides/hono/install/late-initialization/
 app.use(
   sentry(app, {
-    dsn: SENTRY_DSN,
+    dsn: env.SENTRY_DSN,
     // Without this the SDK falls back to "production", so local dev traffic
     // lands in the same bucket as Cloud Run and every env filter is useless.
     // Release is picked up automatically from SENTRY_RELEASE when deploys set it.
@@ -76,7 +75,10 @@ app.use(
 // log drain is supplementary, so a dropped log on a Cloud Run freeze never loses
 // the error itself. Rejections are swallowed to avoid unhandled rejections.
 const fsDrain = createFsDrain();
-const sentryDrain = createSentryDrain({ dsn: SENTRY_DSN, environment: env.NODE_ENV });
+// Only with a DSN: without one, evlog's drain logs "Missing DSN" on every call.
+const sentryDrain = env.SENTRY_DSN
+  ? createSentryDrain({ dsn: env.SENTRY_DSN, environment: env.NODE_ENV })
+  : undefined;
 const posthogDrain =
   env.POSTHOG_PROJECT_TOKEN && env.POSTHOG_HOST
     ? createPostHogDrain({ apiKey: env.POSTHOG_PROJECT_TOKEN, host: env.POSTHOG_HOST })
@@ -94,9 +96,11 @@ app.use(
       if (ctx.event.level === "warn" || ctx.event.level === "error" || failed) {
         // Defer into the chain so a synchronous throw is caught too, rather
         // than escaping as an uncaught error.
-        void Promise.resolve()
-          .then(() => sentryDrain(ctx))
-          .catch(() => {});
+        if (sentryDrain) {
+          void Promise.resolve()
+            .then(() => sentryDrain(ctx))
+            .catch(() => {});
+        }
         if (posthogDrain) {
           void Promise.resolve()
             .then(() => posthogDrain(ctx))
@@ -117,6 +121,19 @@ app.use(compress());
 
 app.get("/", (c) => c.text("OK"));
 app.get("/health", (c) => c.json({ status: "ok" }));
+
+// TODO: move this probe into Terraform with the rest of the service
+/**
+ * Cloud Run's readiness probe: after 2 failures it stops routing to this instance
+ * without killing it, for when one instance can't reach the DB but others can.
+ * A DB error goes through `onError` (500 plus `errorCause`). Configured by hand:
+ * `--readiness-probe httpGet.path=/health/ready,periodSeconds=30,timeoutSeconds=8,failureThreshold=2`
+ * (8s clears the 3s connect timeout plus its one retry.)
+ */
+app.get("/health/ready", async (c) => {
+  await db.execute(sql`select 1`);
+  return c.json({ status: "ok" });
+});
 
 // Ahead of `resolveSession` deliberately: cors answers a preflight with 204 and
 // never calls next(), so an OPTIONS stops resolving a session it cannot use.
@@ -152,7 +169,14 @@ app.use("*", resolveSession);
 // event a bare status with nothing to debug. Logging through the request's own
 // logger attaches it to that event, which the drain above forwards to Sentry.
 app.onError((error, c) => {
-  c.get("log")?.error(error);
+  // evlog serializes an Error `cause` as {}, and Drizzle wraps every pg
+  // failure, so the real reason would be lost.
+  //
+  // FIXME(upstream-evlog): drop `errorCause` once evlog flattens Error causes
+  // (still broken in 2.29.0).
+  // https://github.com/evloghq/evlog/issues/737
+  const cause = error.cause instanceof Error ? error.cause.message : undefined;
+  c.get("log")?.error(error, { errorCause: cause });
   // `use-dashboard-data.ts` string-matches this exact `error` value for its toast.
   return c.json({ error: "Internal Server Error" }, 500);
 });
