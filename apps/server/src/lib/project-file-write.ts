@@ -30,8 +30,6 @@ type ProjectFileRow = {
 };
 
 type ProjectFileContentRow = {
-  /** Legacy jsonb scene, only for rows not yet moved to object storage. */
-  scene: unknown;
   sceneKey: string | null;
   spec: unknown;
   content: unknown;
@@ -107,9 +105,7 @@ export async function writeProjectFile(
   const assignments: Assignment[] = CONTENT_COLUMNS.filter(
     (column) => content[column] !== undefined,
   ).map((column) => [column, jsonb(content[column])]);
-  // The jsonb column is cleared on every scene write, so a migrated row never
-  // carries two copies of its scene.
-  if (writesScene) assignments.push(["scene_key", sql`${sceneKey}`], ["scene", sql`NULL`]);
+  if (writesScene) assignments.push(["scene_key", sql`${sceneKey}`]);
 
   const fileSets: SQL[] = [sql`"updated_at" = now()`];
   if (metadata.name !== undefined) fileSets.push(sql`"name" = ${metadata.name}`);
@@ -139,7 +135,7 @@ export async function writeProjectFile(
   const echoed = (from: string) =>
     echo
       ? sql.raw(
-          ["scene", "scene_key", "spec", "content", "history"]
+          ["scene_key", "spec", "content", "history"]
             .map((column) => `${from}."${column}"`)
             .join(", ") + ",",
         )
@@ -173,7 +169,6 @@ export async function writeProjectFile(
     updated_at: Date;
     content_scene_rev: number | null;
     previous_scene_key: string | null;
-    scene?: unknown;
     scene_key?: string | null;
     spec?: unknown;
     content?: unknown;
@@ -194,7 +189,6 @@ export async function writeProjectFile(
     previousSceneKey: row.previous_scene_key,
     content: echo
       ? {
-          scene: row.scene,
           sceneKey: row.scene_key ?? null,
           spec: row.spec,
           content: row.content,
@@ -234,7 +228,7 @@ function upsertContent(assignments: Assignment[], writesScene: boolean, echo: bo
       SELECT ${sql.join(values, sql`, `)}, owned."id", ${writesScene ? 1 : 0}
         FROM owned ${readsPrev(writesScene)}
       ON CONFLICT ("file_id") DO UPDATE SET ${sql.join(sets, sql`, `)}
-      RETURNING ${returning(echo)}
+      RETURNING ${returning(echo, `"project_file_content"`)}
     )`;
 }
 
@@ -248,11 +242,13 @@ function readsPrev(writesScene: boolean): SQL {
   return writesScene ? sql`LEFT JOIN prev ON true` : sql``;
 }
 
-/** The content columns a write hands back, which is nothing extra unless asked. */
-function returning(echo: boolean): SQL {
-  return echo
-    ? sql`"scene_rev", "scene", "scene_key", "spec", "content", "history"`
-    : sql`"scene_rev"`;
+/**
+ * The content columns a write hands back, which is nothing extra unless asked.
+ * Qualified because the guarded UPDATE joins prev, which also has scene_key.
+ */
+function returning(echo: boolean, table: string): SQL {
+  const columns = echo ? ["scene_rev", "scene_key", "spec", "content", "history"] : ["scene_rev"];
+  return sql.raw(columns.map((column) => `${table}."${column}"`).join(", "));
 }
 
 /**
@@ -276,6 +272,6 @@ function guardedContent(
          SET ${sql.join(sets, sql`, `)}
         FROM owned ${readsPrev(writesScene)}
        WHERE c."file_id" = owned."id" AND c."scene_rev" = ${expectedSceneRev}
-      RETURNING ${returning(echo)}
+      RETURNING ${returning(echo, "c")}
     )`;
 }
