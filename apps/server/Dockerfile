@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.20
 # 1.20 for COPY --parents (manifest-only copies that keep apps/*/packages/* paths).
 
-FROM oven/bun:1-slim AS deps
+# Pinned to `packageManager` in the root package.json; bump both together.
+FROM oven/bun:1.4.3-slim AS deps
 WORKDIR /app
 ENV SKIP_ENV_VALIDATION=1
 
@@ -17,7 +18,7 @@ ENV NODE_ENV=production
 COPY --parents apps/server packages/config packages/auth packages/db packages/env packages/harness ./
 RUN bun run --filter server build
 
-FROM oven/bun:1-slim AS runtime
+FROM oven/bun:1.4.3-slim AS runtime
 WORKDIR /app
 
 # git is required at runtime: repo import shells out to `git clone`.
@@ -54,6 +55,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD bun -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# --preload is load-bearing for db tracing. See the Sentry note in src/index.ts.
 # Prod overrides this with `args` in infra/server.tf (adds --env-file); change both.
-CMD ["bun", "run", "--preload", "@sentry/node/preload", "dist/index.mjs"]
+CMD ["bun", "run", "dist/index.js"]
